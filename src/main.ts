@@ -3,77 +3,67 @@ import {
   TextContainerProperty,
   CreateStartUpPageContainer,
   TextContainerUpgrade,
-  OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
+import { GlanceApp } from './app'
+import { readConfig } from './config'
+import { mapEvent } from './core/events'
+import { DemoCalendar, DemoMail, DemoReplySink } from './adapters/demo'
+import { FetchHttpClient } from './adapters/http'
+import { GoogleCalendarSource } from './adapters/google-calendar'
+import { GmailDraftSink, GmailSource } from './adapters/gmail'
+import { FallbackSummarizer, HeuristicSummarizer, LlmSummarizer } from './adapters/llm'
 
 const bridge = await waitForEvenAppBridge()
+const cfg = readConfig(location.search, Intl.DateTimeFormat().resolvedOptions().timeZone)
 
-const mainText = new TextContainerProperty({
-  xPosition: 0,
-  yPosition: 0,
-  width: 576,
-  height: 288,
-  borderWidth: 0,
-  borderColor: 5,
-  paddingLength: 4,
-  containerID: 1,
-  containerName: 'main',
-  content: 'Hello from G2!\nTap to count · double-tap to exit.',
-  isEventCapture: 1,
+const main = new TextContainerProperty({
+  xPosition: 0, yPosition: 0, width: 576, height: 288,
+  borderWidth: 0, borderColor: 5, paddingLength: 4,
+  containerID: 1, containerName: 'main',
+  content: 'GLANCE BRIEF\nLoading...', isEventCapture: 1,
 })
-
-const result = await bridge.createStartUpPageContainer(
-  new CreateStartUpPageContainer({
-    containerTotalNum: 1,
-    textObject: [mainText],
-  }),
-)
-
+const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer({ containerTotalNum: 1, textObject: [main] }))
 console.log('Page created:', result === 0 ? 'success' : `failed (${result})`)
 
-// Reads the event type out of one envelope.
-//
-// CLICK_EVENT is 0, and protobuf omits zero-value fields on the wire, so a
-// single tap arrives as an envelope whose `eventType` is `undefined`. The
-// default has to be resolved INSIDE the envelope check. Writing
-// `event.sysEvent?.eventType ?? OsEventTypeList.CLICK_EVENT` instead would
-// read CLICK on events that carry no `sysEvent` at all, so every scroll,
-// exit and audio frame would fire the tap handler.
-function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeList | null {
-  if (!envelope) return null
-  return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
+const heuristic = new HeuristicSummarizer()
+let app: GlanceApp
+if (new URLSearchParams(location.search).has('calibrate')) {
+  // Dev aid: measure how many characters fit per line on the 576 px display.
+  const rows = ['W'.repeat(44), 'M'.repeat(44), 'm'.repeat(50), 'a'.repeat(60), 'Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do', '0123456789'.repeat(6), 'A  B   C (spaces)', 'line 8', 'line 9', 'line 10', 'line 11', 'line 12']
+  await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content: rows.join('\n') }))
+  console.log('[glance] screen: calibration')
+  throw new Error('calibration mode')
+}
+if (cfg.demo) {
+  const base = new Date()
+  app = new GlanceApp({
+    calendar: new DemoCalendar(base), mail: new DemoMail(base), summarizer: heuristic, sink: new DemoReplySink(),
+    display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: true,
+  })
+} else {
+  const http = new FetchHttpClient(cfg.backend!, cfg.pairingToken)
+  app = new GlanceApp({
+    calendar: new GoogleCalendarSource(http), mail: new GmailSource(http),
+    summarizer: cfg.model ? new FallbackSummarizer(new LlmSummarizer(http, cfg.model), heuristic) : heuristic,
+    sink: new GmailDraftSink(http), display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: false,
+  })
 }
 
-// Event routing, critical details:
-//   • Taps/double-taps/lifecycle come through `event.sysEvent`.
-//     Scroll gestures come through `event.textEvent`. Never mix them.
-//   • Double-tap → `shutDownPageContainer(1)` is a root-level check: it
-//     must fire no matter which envelope the event arrives in, so users
-//     can always exit the app.
-//   • Check DOUBLE_CLICK_EVENT before CLICK_EVENT.
-let taps = 0
+function display() {
+  return {
+    show: async (text: string) => {
+      await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content: text }))
+      console.log('[glance] screen:', text.split('\n')[0])
+    },
+    exit: async () => { await bridge.shutDownPageContainer(1) },
+  }
+}
+
 const unsubscribe = bridge.onEvenHubEvent(event => {
-  const sysType = eventTypeOf(event.sysEvent)
-  const textType = eventTypeOf(event.textEvent)
-
-  if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    bridge.shutDownPageContainer(1)
-    return
-  }
-
-  if (sysType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
-    taps += 1
-    bridge.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: 1,
-        containerName: 'main',
-        content: `Taps: ${taps}\nTap to count · double-tap to exit.`,
-      }),
-    )
-    return
-  }
-
-  if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT || sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
-    unsubscribe()
-  }
+  const m = mapEvent(event as Parameters<typeof mapEvent>[0])
+  if (!m) return
+  if (m.type === 'lifecycle_exit') { unsubscribe(); return }
+  void app.dispatch(m)
 })
+
+await app.load()

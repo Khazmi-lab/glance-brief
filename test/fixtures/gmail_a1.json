@@ -1,0 +1,3 @@
+{ "_comment": "TEST DATA (synthetic)", "id": "a1", "threadId": "t1", "internalDate": "1795442400000",
+  "snippet": "Hi, can you confirm the budget numbers before the planning meeting? Finance needs them by 16:00 &amp; I&#39;d rather not chase.",
+  "payload": { "headers": [ { "name": "From", "value": "\"Giulia Bianchi\" <giulia@example.com>" }, { "name": "Subject", "value": "Budget numbers for planning" } ] } }

@@ -1,0 +1,17 @@
+{
+  "_comment": "TEST DATA (synthetic, invented) - shape of Calendar API v3 events.list",
+  "kind": "calendar#events",
+  "items": [
+    { "id": "allday1", "status": "confirmed", "summary": "Public holiday", "start": { "date": "2026-11-23" }, "end": { "date": "2026-11-24" } },
+    { "id": "cx1", "status": "cancelled", "summary": "Cancelled sync", "start": { "dateTime": "2026-11-23T14:30:00Z" }, "end": { "dateTime": "2026-11-23T15:00:00Z" } },
+    { "id": "dec1", "status": "confirmed", "summary": "Declined meeting", "start": { "dateTime": "2026-11-23T14:20:00Z" }, "end": { "dateTime": "2026-11-23T14:50:00Z" },
+      "attendees": [ { "email": "me@example.com", "self": true, "responseStatus": "declined" } ] },
+    { "id": "m1", "status": "confirmed", "summary": "Quarterly planning with the platform team",
+      "location": "Meeting room 3 (second floor, east wing)",
+      "description": "<p>Agenda:<br>1. Q1 roadmap &amp; staffing.<br>2. Budget for the observability migration, which overran by 12% last quarter and needs a decision today.<br>3. On-call rotation changes requested by the SRE group, plus a long tail of follow-ups from the last retro that nobody owns yet.</p>",
+      "start": { "dateTime": "2026-11-23T14:12:00Z" }, "end": { "dateTime": "2026-11-23T15:00:00Z" },
+      "hangoutLink": "https://meet.example.com/abc-defg-hij",
+      "attendees": [ { "email": "me@example.com", "self": true, "responseStatus": "accepted" }, { "email": "giulia@example.com", "displayName": "Giulia" }, { "email": "omar@example.com" } ] },
+    { "id": "m2", "status": "confirmed", "summary": "Lunch", "start": { "dateTime": "2026-11-23T16:00:00+01:00" }, "end": { "dateTime": "2026-11-23T17:00:00+01:00" } }
+  ]
+}

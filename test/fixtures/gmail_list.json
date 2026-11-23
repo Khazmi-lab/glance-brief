@@ -1,0 +1,1 @@
+{ "_comment": "TEST DATA (synthetic)", "messages": [ { "id": "a1", "threadId": "t1" }, { "id": "a2", "threadId": "t2" } ], "resultSizeEstimate": 2 }

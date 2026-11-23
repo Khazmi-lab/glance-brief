@@ -1,0 +1,3 @@
+{ "_comment": "TEST DATA (synthetic)", "id": "a2", "threadId": "t2", "internalDate": "1795438800000",
+  "snippet": "Your package has shipped.",
+  "payload": { "headers": [ { "name": "From", "value": "shipping@example.com" }, { "name": "Subject", "value": "Re: Order 1234" } ] } }
