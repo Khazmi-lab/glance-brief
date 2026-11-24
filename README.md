@@ -99,5 +99,14 @@ Done: core logic, adapters, demo mode, backend (pairing-code OAuth, token store,
 Calendar/LLM proxy), pairing flow in the app, `app.json` network whitelist, 84 tests, build, `.ehpk`
 pack, simulator walk-throughs (demo data; pairing screen against the local backend).
 Not tested against real Google or a real LLM (all upstreams are test doubles so far).
+Demo video (≤ 3 min): real Even Hub simulator 0.9.5 captures of this build in DEMO mode plus the
+pairing screen against the local backend (see the BUIDL page for the link).
 Not done: hosting, voice reply (long press), Notion "ask my notes", real-account demo (needs the
-owner's own Google account/OAuth client and an LLM key), demo video.
+owner's own Google account/OAuth client and an LLM key).
+
+## Third-party code
+The first commit is the official Even Hub `minimal` template, unmodified; SDK, CLI and simulator are
+published by Even Realities under their own terms and are installed from npm, not vendored here.
+
+## License
+MIT © 2026 Metaz Al Khazmi — see [LICENSE](LICENSE).
