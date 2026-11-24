@@ -5,6 +5,7 @@
 //   POST /pair/revoke (Bearer)       glasses app: unpair; account tokens deleted with the last device
 //   GET  /pair, POST /pair (form)    phone/laptop: enter code -> redirect to Google consent
 //   GET  /oauth/callback             Google redirect: store tokens, approve pairing
+//   POST /stt/v1/transcribe (Bearer)  glasses app: dictation PCM -> text (see stt.ts)
 //   Everything else -> allow-list proxy (Bearer device token required).
 // Logs never contain tokens, codes, or message content.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -13,12 +14,15 @@ import type { GoogleOAuth } from './google.ts'
 import { PairingService, RateLimiter } from './pairing.ts'
 import { Proxy, ProxyError } from './proxy.ts'
 import type { TokenStore } from './store.ts'
+import { STT_MAX_BODY, SttError, type SttProxy } from './stt.ts'
 
 export interface Deps {
   store: TokenStore
   pairing: PairingService
   oauth: GoogleOAuth
   proxy: Proxy
+  /** Speech-to-text for voice replies; absent -> 503 on /stt/v1/transcribe. */
+  stt?: SttProxy
   /** Allowed CORS origins for the WebView; '*' allows any (auth is a Bearer header, no cookies). */
   corsOrigins: string[]
   now?: () => number
@@ -32,13 +36,15 @@ class HttpError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status }
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, max = MAX_BODY): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Declared size over the cap: answer 413 without reading (the socket is closed after the reply).
+    if (Number(req.headers['content-length'] ?? 0) > max) { reject(new HttpError(413, 'body too large')); return }
     let size = 0
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => {
       size += c.length
-      if (size > MAX_BODY) { reject(new HttpError(413, 'body too large')); req.destroy(); return }
+      if (size > max) { reject(new HttpError(413, 'body too large')); req.destroy(); return }
       chunks.push(c)
     })
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
@@ -145,6 +151,12 @@ export function createHandler(d: Deps) {
     if (!apiLimiter.allow(dev.tokenHash)) throw new HttpError(429, 'rate limited')
     const acc = await d.store.getAccount(dev.accountId)
     if (!acc) throw new HttpError(401, 'account removed')
+    if (method === 'POST' && path === '/stt/v1/transcribe') {
+      if (!d.stt) throw new HttpError(503, 'no speech-to-text configured on the backend')
+      const r = await d.stt.transcribe(parseJson(await readBody(req, STT_MAX_BODY)))
+      log(`POST /stt/v1/transcribe -> ${r.status} (${r.seconds.toFixed(1)} s audio)`)
+      return json(res, r.status, r.body)
+    }
     const body = method === 'POST' ? parseJson(await readBody(req)) : undefined
     const r = await d.proxy.handle(acc, method, path, url.searchParams, body)
     log(`${method} ${path.replace(/\/messages\/[^/]+$/, '/messages/:id')} -> ${r.status}`)
@@ -154,8 +166,9 @@ export function createHandler(d: Deps) {
   return async (req: IncomingMessage, res: ServerResponse) => {
     cors(req, res)
     try { await route(req, res) } catch (e) {
-      const status = e instanceof HttpError || e instanceof ProxyError ? e.status : 500
+      const status = e instanceof HttpError || e instanceof ProxyError || e instanceof SttError ? e.status : 500
       if (status === 500) log(`error: ${e instanceof Error ? e.message : String(e)}`)
+      if (status === 413 && !res.headersSent) res.setHeader('connection', 'close')
       if (!res.headersSent) json(res, status, { error: status === 500 ? 'internal error' : (e as Error).message })
       else res.end()
     }

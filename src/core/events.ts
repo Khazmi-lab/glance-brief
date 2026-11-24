@@ -30,6 +30,8 @@ export function mapEvent(ev: { sysEvent?: Envelope; textEvent?: Envelope; listEv
   // Scroll naming: SCROLL_TOP = swipe toward the top (previous), SCROLL_BOTTOM = next.
   if (types.includes(EV.SCROLL_TOP)) return { type: 'up' }
   if (types.includes(EV.SCROLL_BOTTOM)) return { type: 'down' }
+  // Release is checked before press in case a host sends both in one envelope.
+  if (types.includes(EV.LONG_PRESS_RELEASE)) return { type: 'long_press_release' }
   if (types.includes(EV.LONG_PRESS)) return { type: 'long_press' }
   if (types.includes(EV.CLICK)) return { type: 'click' }
   return null

@@ -3,6 +3,7 @@ import {
   TextContainerProperty,
   CreateStartUpPageContainer,
   TextContainerUpgrade,
+  AudioInputSource,
 } from '@evenrealities/even_hub_sdk'
 import { GlanceApp } from './app'
 import { readConfig } from './config'
@@ -13,6 +14,8 @@ import { PairingClient, TOKEN_KEY, browserStorage, runPairing } from './adapters
 import { GoogleCalendarSource } from './adapters/google-calendar'
 import { GmailDraftSink, GmailSource } from './adapters/gmail'
 import { FallbackSummarizer, HeuristicSummarizer, LlmSummarizer } from './adapters/llm'
+import { BackendStt, DemoStt } from './adapters/stt'
+import type { Mic } from './core/types'
 
 const bridge = await waitForEvenAppBridge()
 const cfg = readConfig(location.search, Intl.DateTimeFormat().resolvedOptions().timeZone)
@@ -36,11 +39,18 @@ if (new URLSearchParams(location.search).has('calibrate')) {
   throw new Error('calibration mode')
 }
 let exiting = false
+// Glasses microphone (16 kHz s16le PCM frames arrive as audioEvent). Opened only while
+// the user holds a long press on an email; closed on release, swipe, cap or exit.
+const mic: Mic = {
+  open: async () => { const ok = await bridge.audioControl(true, AudioInputSource.Glasses); console.log('[glance] mic open:', ok); return ok },
+  close: async () => { console.log('[glance] mic close, captured bytes:', app?.voice.bytes ?? 0); await bridge.audioControl(false) },
+}
 if (cfg.demo) {
   const base = new Date()
   app = new GlanceApp({
     calendar: new DemoCalendar(base), mail: new DemoMail(base), summarizer: heuristic, sink: new DemoReplySink(),
     display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: true,
+    mic, stt: new DemoStt(),
   })
 } else {
   // Device token: launch URL (?pair=) for development, else storage, else pair now.
@@ -65,6 +75,7 @@ if (cfg.demo) {
     calendar: new GoogleCalendarSource(http), mail: new GmailSource(http),
     summarizer: cfg.model ? new FallbackSummarizer(new LlmSummarizer(http, cfg.model), heuristic) : heuristic,
     sink: new GmailDraftSink(http), display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: false,
+    mic, stt: new BackendStt(http),
   })
 }
 
@@ -79,9 +90,11 @@ function display() {
 }
 
 const unsubscribe = bridge.onEvenHubEvent(event => {
+  const audio = (event as { audioEvent?: { audioPcm?: unknown } }).audioEvent
+  if (audio) { app.pushAudio(audio.audioPcm); return }
   const m = mapEvent(event as Parameters<typeof mapEvent>[0])
   if (!m) return
-  if (m.type === 'lifecycle_exit') { unsubscribe(); return }
+  if (m.type === 'lifecycle_exit') { app.voice.discard(); void mic.close().catch(() => {}); unsubscribe(); return }
   void app.dispatch(m)
 })
 

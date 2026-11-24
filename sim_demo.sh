@@ -2,7 +2,8 @@
 # Drive the built app in the Even Hub simulator (headless, Xvfb) through a list of
 # inputs and save a glasses screenshot after each step.
 # Usage: ./sim_demo.sh <out_dir> "<query>" action1 action2 ...
-#   actions: click | double_click | up | down | long_press
+#   actions: click | double_click | up | down | long_press | long_press_release | sleep<seconds> (no shot)
+# Optional env: SIM_ARGS (extra simulator flags, e.g. "--aid alsa:pulse" for a PulseAudio test source).
 # Needs: npm run build; simulator 0.9.5 from ../env; xvfb-run.
 set -u
 cd "$(dirname "$0")"
@@ -14,7 +15,7 @@ cleanup(){ kill ${SIMPID:-} ${WEBPID:-} 2>/dev/null; pkill -f "evenhub-simulator
 trap cleanup EXIT
 npx vite preview --host 127.0.0.1 --port "$WEB" --strictPort >"$OUT/web.log" 2>&1 & WEBPID=$!
 for i in $(seq 1 20); do curl -sf -m 1 "http://127.0.0.1:$WEB/" >/dev/null && break; sleep 0.5; done
-xvfb-run -a -s "-screen 0 1280x900x24" "$SIM" "http://127.0.0.1:$WEB/$Q" --automation-port "$AP" >"$OUT/sim.log" 2>&1 & SIMPID=$!
+xvfb-run -a -s "-screen 0 1280x900x24" "$SIM" "http://127.0.0.1:$WEB/$Q" ${SIM_ARGS:-} --automation-port "$AP" >"$OUT/sim.log" 2>&1 & SIMPID=$!
 for i in $(seq 1 30); do [ "$(curl -s -m 1 "http://127.0.0.1:$AP/api/ping")" = pong ] && break; sleep 0.5; done
 for i in $(seq 1 30); do curl -s "http://127.0.0.1:$AP/api/console" | grep -q '\[glance\] screen' && break; sleep 0.5; done
 sleep 0.5
@@ -22,6 +23,7 @@ n=0
 shot(){ curl -sf -o "$OUT/$(printf %02d $n)-$1.png" "http://127.0.0.1:$AP/api/screenshot/glasses" && echo "shot $(printf %02d $n)-$1.png"; n=$((n+1)); }
 shot start
 for a in "$@"; do
+  case "$a" in sleep*) sleep "${a#sleep}"; continue ;; esac
   curl -sf -XPOST -H 'content-type: application/json' -d "{\"action\":\"$a\"}" "http://127.0.0.1:$AP/api/input" >/dev/null || echo "input $a failed"
   sleep 0.8; shot "$a"
 done

@@ -26,6 +26,18 @@ export class HeuristicSummarizer implements Summarizer {
   async replyDraft(e: EmailItem) {
     return `Thanks ${e.from.split(' ')[0]}, got it. I will get back to you today.`
   }
+  /** Offline: use the dictation as-is (tidied), never adding content. */
+  async polishReply(_e: EmailItem, said: string) {
+    return tidyDictation(said)
+  }
+}
+
+/** Capitalise, end with punctuation, cap at 40 words. Adds no words. */
+export function tidyDictation(said: string): string {
+  let t = limitWords(said, 40)
+  if (!t) return ''
+  t = t[0].toUpperCase() + t.slice(1)
+  return /[.!?]$/.test(t) ? t : `${t}.`
 }
 
 const SYSTEM =
@@ -61,6 +73,10 @@ export class LlmSummarizer implements Summarizer {
     const u = `Draft a short, polite one-sentence reply (max 25 words) to this email. No sign-off.\nFrom: ${e.from}\nSubject: ${e.subject}\nText: ${e.snippet.slice(0, 1500)}`
     return limitWords(await this.ask(u, 80), 25)
   }
+  async polishReply(e: EmailItem, said: string) {
+    const u = `Rewrite my dictated words as a short, polite email reply (max 30 words). Keep my meaning exactly; do not add facts, times, promises or names I did not say. No greeting or sign-off.\nReplying to: ${e.from}, subject "${e.subject}"\nI said: ${clean(said).slice(0, 1000)}`
+    return limitWords(await this.ask(u, 100), 30)
+  }
 }
 
 /** Use the primary summarizer, falling back per call (keeps the glance screen alive). */
@@ -69,4 +85,5 @@ export class FallbackSummarizer implements Summarizer {
   meetingBrief(m: Meeting, n: number) { return this.primary.meetingBrief(m, n).catch(() => this.fallback.meetingBrief(m, n)) }
   emailSummary(e: EmailItem, n: number) { return this.primary.emailSummary(e, n).catch(() => this.fallback.emailSummary(e, n)) }
   replyDraft(e: EmailItem) { return this.primary.replyDraft(e).catch(() => this.fallback.replyDraft(e)) }
+  polishReply(e: EmailItem, said: string) { return this.primary.polishReply(e, said).catch(() => this.fallback.polishReply(e, said)) }
 }

@@ -1,12 +1,13 @@
 // Fake upstreams (TEST DOUBLES): Google OAuth token endpoint, Gmail v1, Calendar v3,
-// and an OpenAI-compatible LLM. Records every call so tests can assert what was sent.
+// an OpenAI-compatible LLM and an OpenAI-compatible speech-to-text endpoint.
+// Records every call so tests can assert what was sent.
 import { readFileSync } from 'node:fs'
 
 const fx = (n: string) => JSON.parse(readFileSync(new URL(`../../test/fixtures/${n}`, import.meta.url), 'utf8'))
 
-export interface Call { method: string; url: string; auth?: string; body?: string }
+export interface Call { method: string; url: string; auth?: string; body?: string; form?: { model?: string; responseFormat?: string; fileName?: string; fileType?: string; wav?: Uint8Array } }
 
-export function fakeUpstream(opts: { expireFirstAccess?: boolean; scope?: string; llmReply?: string } = {}) {
+export function fakeUpstream(opts: { expireFirstAccess?: boolean; scope?: string; llmReply?: string; sttText?: string; sttStatus?: number } = {}) {
   const calls: Call[] = []
   let issued = 0
   const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -14,8 +15,19 @@ export function fakeUpstream(opts: { expireFirstAccess?: boolean; scope?: string
     const url = String(input)
     const headers = new Headers(init.headers)
     const body = typeof init.body === 'string' ? init.body : undefined
-    calls.push({ method: init.method ?? 'GET', url, auth: headers.get('authorization') ?? undefined, body })
+    const call: Call = { method: init.method ?? 'GET', url, auth: headers.get('authorization') ?? undefined, body }
+    calls.push(call)
     const u = new URL(url)
+    if (u.host === 'stt.test') {
+      if (init.body instanceof FormData) {
+        const f = init.body.get('file') as File | null
+        call.form = { model: String(init.body.get('model')), responseFormat: String(init.body.get('response_format')), fileName: f?.name, fileType: f?.type, wav: f ? new Uint8Array(await f.arrayBuffer()) : undefined }
+      }
+      if (headers.get('authorization') !== 'Bearer stt-key') return reply(401, {})
+      if (u.pathname !== '/v1/audio/transcriptions' || init.method !== 'POST') return reply(404, {})
+      if (opts.sttStatus) return reply(opts.sttStatus, { error: 'upstream' })
+      return reply(200, { text: opts.sttText ?? '  sure, slide four is fine   ' })
+    }
     if (url === 'https://oauth2.googleapis.com/token') {
       const p = new URLSearchParams(body)
       issued++

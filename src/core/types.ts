@@ -42,6 +42,20 @@ export interface Summarizer {
   emailSummary(e: EmailItem, maxWords: number): Promise<string>
   /** Short reply draft for an email (one sentence). */
   replyDraft(e: EmailItem): Promise<string>
+  /** Turn what the user dictated into a short reply. Must keep the meaning and add no facts. */
+  polishReply(e: EmailItem, said: string): Promise<string>
+}
+
+/** Speech-to-text. Production: the backend's allow-listed STT route (the key stays server-side). */
+export interface SpeechToText {
+  /** 16 kHz s16le mono PCM -> plain text ('' if nothing was understood). */
+  transcribe(pcm: Uint8Array): Promise<string>
+}
+
+/** Microphone control (glasses mic via the Even Hub bridge in production). */
+export interface Mic {
+  open(): Promise<boolean>
+  close(): Promise<void>
 }
 
 /** The only write path. Implementations must create a draft / send ONLY when called;

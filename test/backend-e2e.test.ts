@@ -7,7 +7,8 @@ import { GoogleCalendarSource } from '../src/adapters/google-calendar'
 import { FetchHttpClient } from '../src/adapters/http'
 import { FallbackSummarizer, HeuristicSummarizer, LlmSummarizer } from '../src/adapters/llm'
 import { PairingClient, pairingScreen, runPairing } from '../src/adapters/pairing'
-import { approveOnPhone, boot } from '../server/test/harness'
+import { BackendStt } from '../src/adapters/stt'
+import { approveOnPhone, boot, pairDevice } from '../server/test/harness'
 import { expectFits } from './helpers'
 
 let close: (() => Promise<void>) | undefined
@@ -105,5 +106,39 @@ describe('glasses app <-> backend <-> Google (mocked)', () => {
     const mail = await new GmailSource(http).unread(2)
     const sum = new FallbackSummarizer(new LlmSummarizer(http, 'test-model'), new HeuristicSummarizer())
     expect(await sum.emailSummary(mail[0], 12)).toBe(await new HeuristicSummarizer().emailSummary(mail[0], 12))
+  })
+
+  it('voice reply end to end: hold -> PCM -> backend STT -> LLM polish -> confirm -> one Gmail draft, never sent', async () => {
+    const b = await boot({ sttText: 'yes the budget numbers are coming before four', llmReply: 'Yes, the budget numbers are coming before 16:00.' })
+    close = b.close
+    const token = await pairDevice(b.base)
+    const http = new FetchHttpClient(b.base, token)
+    const shown: string[] = []
+    const mic = { log: [] as string[], open: async () => { mic.log.push('open'); return true }, close: async () => { mic.log.push('close') } }
+    const app = new GlanceApp({
+      calendar: new GoogleCalendarSource(http), mail: new GmailSource(http),
+      summarizer: new FallbackSummarizer(new LlmSummarizer(http, 'test-model'), new HeuristicSummarizer()),
+      sink: new GmailDraftSink(http), display: { show: t => { shown.push(t) }, exit: () => {} },
+      now: () => new Date('2026-11-23T13:20:00Z'), timeZone: 'Europe/Rome', demo: false,
+      mic, stt: new BackendStt(http),
+    })
+    await app.load()
+    await app.dispatch({ type: 'click' }) // first email
+    await app.dispatch({ type: 'long_press' })
+    for (let i = 0; i < 20; i++) app.pushAudio(Array.from(new Uint8Array(3200).fill(i))) // number[] frames, as some hosts send
+    await app.dispatch({ type: 'long_press_release' })
+    expect(mic.log).toEqual(['open', 'close'])
+    const sttCall = b.up.calls.find(c => c.url.includes('stt.test'))!
+    expect(sttCall.form!.wav!.length).toBe(44 + 20 * 3200)
+    const llmCall = b.up.calls.filter(c => c.url.includes('llm.test')).at(-1)!
+    expect(llmCall.body).toContain('I said: yes the budget numbers are coming before four')
+    expect(shown.at(-1)).toContain('Yes, the budget numbers are coming')
+    expect(b.up.calls.filter(c => c.url.endsWith('/drafts'))).toHaveLength(0)
+    await app.dispatch({ type: 'click' })
+    expect(shown.at(-1)).toContain('Draft saved in Gmail (not sent)')
+    expect(b.up.calls.filter(c => c.url.endsWith('/drafts'))).toHaveLength(1)
+    expect(b.up.calls.some(c => /\/send\b/.test(c.url))).toBe(false)
+    expect(b.logs.join('\n')).not.toMatch(/budget numbers/)
+    shown.forEach(expectFits)
   })
 })

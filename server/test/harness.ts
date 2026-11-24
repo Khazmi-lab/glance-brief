@@ -5,9 +5,10 @@ import { PairingService } from '../src/pairing.ts'
 import { Proxy } from '../src/proxy.ts'
 import { startServer } from '../src/server.ts'
 import { MemoryStore, type TokenStore } from '../src/store.ts'
+import { SttProxy } from '../src/stt.ts'
 import { fakeUpstream } from './fake-google.ts'
 
-export async function boot(opts: Parameters<typeof fakeUpstream>[0] & { llm?: boolean; store?: TokenStore; cors?: string[] } = {}) {
+export async function boot(opts: Parameters<typeof fakeUpstream>[0] & { llm?: boolean; stt?: boolean; store?: TokenStore; cors?: string[] } = {}) {
   const up = fakeUpstream(opts)
   const store = opts.store ?? new MemoryStore()
   const oauth = new GoogleOAuth({ clientId: 'cid.apps.googleusercontent.com', clientSecret: 'csecret', redirectUri: 'http://127.0.0.1/oauth/callback' }, up.impl)
@@ -15,6 +16,7 @@ export async function boot(opts: Parameters<typeof fakeUpstream>[0] & { llm?: bo
   const server: Server = await startServer({
     store, oauth, pairing: new PairingService(store),
     proxy: new Proxy(store, oauth, opts.llm === false ? undefined : { baseUrl: 'https://llm.test/v1', apiKey: 'llm-key', models: ['test-model'] }, up.impl),
+    stt: opts.stt === false ? undefined : new SttProxy({ baseUrl: 'https://stt.test/v1', apiKey: 'stt-key', model: 'whisper-test' }, up.impl),
     corsOrigins: opts.cors ?? ['*'], log: l => logs.push(l),
   }, 0)
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
