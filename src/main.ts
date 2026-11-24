@@ -9,6 +9,7 @@ import { readConfig } from './config'
 import { mapEvent } from './core/events'
 import { DemoCalendar, DemoMail, DemoReplySink } from './adapters/demo'
 import { FetchHttpClient } from './adapters/http'
+import { PairingClient, TOKEN_KEY, browserStorage, runPairing } from './adapters/pairing'
 import { GoogleCalendarSource } from './adapters/google-calendar'
 import { GmailDraftSink, GmailSource } from './adapters/gmail'
 import { FallbackSummarizer, HeuristicSummarizer, LlmSummarizer } from './adapters/llm'
@@ -34,6 +35,7 @@ if (new URLSearchParams(location.search).has('calibrate')) {
   console.log('[glance] screen: calibration')
   throw new Error('calibration mode')
 }
+let exiting = false
 if (cfg.demo) {
   const base = new Date()
   app = new GlanceApp({
@@ -41,7 +43,24 @@ if (cfg.demo) {
     display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: true,
   })
 } else {
-  const http = new FetchHttpClient(cfg.backend!, cfg.pairingToken)
+  // Device token: launch URL (?pair=) for development, else storage, else pair now.
+  const storage = browserStorage()
+  let token = cfg.pairingToken ?? storage.get(TOKEN_KEY) ?? undefined
+  if (!token) {
+    // Exit must work during pairing too (platform rule: double tap exits everywhere).
+    const stopPairing = bridge.onEvenHubEvent(event => {
+      const m = mapEvent(event as Parameters<typeof mapEvent>[0])
+      if (m?.type === 'double_click') { exiting = true; void bridge.shutDownPageContainer(1) }
+    })
+    token = (await runPairing({
+      client: new PairingClient(cfg.backend!), baseUrl: cfg.backend!, show: display().show,
+      now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)), cancelled: () => exiting,
+    })) ?? undefined
+    stopPairing()
+    if (!token) throw new Error('not paired')
+    storage.set(TOKEN_KEY, token)
+  }
+  const http = new FetchHttpClient(cfg.backend!, token, undefined, () => storage.remove(TOKEN_KEY))
   app = new GlanceApp({
     calendar: new GoogleCalendarSource(http), mail: new GmailSource(http),
     summarizer: cfg.model ? new FallbackSummarizer(new LlmSummarizer(http, cfg.model), heuristic) : heuristic,

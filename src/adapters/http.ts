@@ -8,7 +8,17 @@ export interface HttpClient {
 }
 
 export class FetchHttpClient implements HttpClient {
-  constructor(private baseUrl: string, private pairingToken?: string, private fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private baseUrl: string,
+    private pairingToken?: string,
+    private fetchImpl: typeof fetch = (...a) => fetch(...a),
+    /** Called on HTTP 401 (device token revoked/unknown) so the app can forget it and re-pair. */
+    private onUnauthorized?: () => void,
+  ) {}
+  private check(r: Response, what: string) {
+    if (r.status === 401) this.onUnauthorized?.()
+    if (!r.ok) throw new Error(`${what} -> HTTP ${r.status}`)
+  }
   private headers(): Record<string, string> {
     const h: Record<string, string> = { accept: 'application/json' }
     if (this.pairingToken) h.authorization = `Bearer ${this.pairingToken}`
@@ -16,7 +26,7 @@ export class FetchHttpClient implements HttpClient {
   }
   async getJson(path: string): Promise<unknown> {
     const r = await this.fetchImpl(this.baseUrl + path, { headers: this.headers() })
-    if (!r.ok) throw new Error(`GET ${path.split('?')[0]} -> HTTP ${r.status}`)
+    this.check(r, `GET ${path.split('?')[0]}`)
     return r.json()
   }
   async postJson(path: string, body: unknown): Promise<unknown> {
@@ -25,7 +35,7 @@ export class FetchHttpClient implements HttpClient {
       headers: { ...this.headers(), 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (!r.ok) throw new Error(`POST ${path.split('?')[0]} -> HTTP ${r.status}`)
+    this.check(r, `POST ${path.split('?')[0]}`)
     return r.json()
   }
 }

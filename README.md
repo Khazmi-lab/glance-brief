@@ -13,7 +13,8 @@ Built during the window (first app commit 23 Nov 2026). Before the window there 
 - A written design note / build plan (product idea, screen list, judging notes).
 - Local environment scripts: a toolchain check (`env_check.sh`) and a simulator smoke test
   (`sim_smoke.sh`) run against the unmodified template.
-Everything in `src/`, `test/`, and `sim_demo.sh` was written in the window.
+Everything in `src/`, `test/`, `server/`, `scripts/` and `sim_demo.sh` was written in the window
+(app: 23 Nov; backend, pairing flow and `app.json` network whitelist: 24 Nov).
 Open-source dependencies: TypeScript, Vite, Vitest.
 
 ## Screens (each ≤ 6 lines)
@@ -39,10 +40,44 @@ Double tap exits from every screen (platform rule). Failures (e.g. `mail: HTTP 4
   - `llm.ts` OpenAI-compatible `/chat/completions` summarizer (OpenAI / OpenRouter / Claude via
     gateway), offline heuristic fallback, per-call fallback wrapper.
   - `demo.ts` **DEMO / TEST DATA** (invented people, example.com). Shown with `DEMO` in every header.
-- No secrets in the WebView: adapters call a backend (`?backend=https://…&pair=<pairing token>&model=…`)
-  that holds the OAuth token and LLM key. Google sign-in does not work inside the WebView, so the
-  plan is a separate login page + pairing code. **The backend is not written yet** (next step).
-  Without `backend` the app runs in DEMO mode.
+- No secrets in the WebView: adapters call the Glance Brief backend (`?backend=https://…&model=…`),
+  which holds the Google OAuth tokens and the LLM key. Without `backend` the app runs in DEMO mode.
+- `src/adapters/pairing.ts` pairing client, pairing screen, device-token storage (localStorage);
+  an HTTP 401 from the backend forgets the token so the next launch re-pairs.
+
+## Backend (`server/`, Node ≥ 22.6, no runtime dependencies)
+Google sign-in does not work inside the WebView, so the glasses pair with a code:
+1. The app calls `POST /pair/start` and shows `Enter code ABCD-EF23` + the backend's `/pair` URL
+   (10-minute, single-use code from an unambiguous alphabet; the app keeps a secret poll token).
+2. On a phone/laptop the user opens `/pair`, types the code, and is sent to Google consent with
+   scopes `gmail.readonly`, `gmail.compose`, `calendar.readonly` (OAuth `state` is bound to the code).
+3. `/oauth/callback` exchanges the code, stores the refresh token, and approves the pairing.
+4. The app's `POST /pair/poll` receives a device token **once**; the server stores only its SHA-256.
+   `POST /pair/revoke` unpairs (and deletes the Google tokens with the last device).
+
+Allow-list proxy (`server/src/proxy.ts`), everything else is 404:
+| App call | Forwarded to | Limits |
+|---|---|---|
+| `GET /gmail/v1/users/me/messages` | Gmail `messages.list` | `q`, `maxResults ≤ 20`, `pageToken` only |
+| `GET /gmail/v1/users/me/messages/:id` | Gmail `messages.get` | **forced `format=metadata`**, From/Subject/Date/To headers |
+| `POST /gmail/v1/users/me/drafts` | Gmail `drafts.create` | body must be `{message:{raw,threadId?}}`; returns only the draft id |
+| `GET /calendar/v3/calendars/:id/events` | Calendar `events.list` | timeMin/timeMax/singleEvents/orderBy/`maxResults ≤ 20` |
+| `POST /llm/v1/chat/completions` | OpenAI-compatible LLM | model allow-list, ≤ 4 system/user messages, ≤ 8,000 chars, `max_tokens ≤ 200` |
+Google has no drafts-only scope: `gmail.compose` could also send, so **send is blocked in the
+proxy** (no `messages/send`, `drafts/send`, modify, trash or delete route exists; tested). Drafts are
+refused with 403 if the user unticked `gmail.compose` on the consent screen. Access tokens are
+refreshed server-side (and once on an upstream 401). Rate limits: code entry 10/10 min per IP,
+`/pair/start` 20/10 min per IP, 120 proxied calls/min per device. Logs contain no tokens, codes or
+message content (tested). Token store: `MemoryStore` or `EncryptedFileStore` (AES-256-GCM, key from env).
+
+```bash
+PUBLIC_URL=https://your-backend.example GOOGLE_CLIENT_ID=… GOOGLE_CLIENT_SECRET=… \
+GLANCE_STORE_FILE=./store.json GLANCE_STORE_KEY=$(openssl rand -base64 32) \
+LLM_BASE_URL=https://openrouter.ai/api/v1 LLM_API_KEY=… LLM_MODELS=<model> npm run server
+node scripts/set-whitelist.mjs https://your-backend.example && npm run pack   # app.json network whitelist
+```
+The committed `app.json` whitelists `http://localhost:8787` (local development). A hosted backend URL,
+a Google Cloud OAuth client (the owner's), and an LLM key are still needed for a real-account demo.
 
 ## Display budget
 Simulator 0.9.5 calibration (`?calibrate=1`): one line fits ~35 `W`/`M`, ~51 `a`, ~62 chars of
@@ -52,13 +87,17 @@ mixed prose; line pitch ~27 px (≈10 lines). We use ≤ 6 lines × ≤ 40 chars
 ## Run
 ```bash
 npm install
-npm test            # vitest unit + integration tests (fixtures in test/fixtures are synthetic TEST DATA)
-npm run build       # tsc --noEmit + vite build
+npm test            # vitest: app + backend unit/HTTP tests + app<->backend end-to-end (Google/LLM are fakes; fixtures are synthetic TEST DATA)
+npm run build       # tsc (app + server) + vite build
 npm run pack        # -> glance-brief.ehpk (local only)
-./sim_demo.sh /tmp/out "" down down down click click click double_click   # headless simulator walk-through
+./sim_demo.sh /tmp/out "" down down down click click click double_click        # demo-data walk-through
+./sim_demo.sh /tmp/out "?backend=http://localhost:8787" double_click          # pairing screen (backend running)
 ```
 
-## Status (23 Nov 2026)
-Done: core logic, adapters, demo mode, 49 tests, build, `.ehpk` pack, simulator walk-through.
-Not done: backend (OAuth pairing, proxy, LLM key), voice reply (long press), Notion "ask my notes",
-real-account demo (needs the owner's own Google account and an LLM key).
+## Status (24 Nov 2026)
+Done: core logic, adapters, demo mode, backend (pairing-code OAuth, token store, allow-list Gmail/
+Calendar/LLM proxy), pairing flow in the app, `app.json` network whitelist, 84 tests, build, `.ehpk`
+pack, simulator walk-throughs (demo data; pairing screen against the local backend).
+Not tested against real Google or a real LLM (all upstreams are test doubles so far).
+Not done: hosting, voice reply (long press), Notion "ask my notes", real-account demo (needs the
+owner's own Google account/OAuth client and an LLM key), demo video.
