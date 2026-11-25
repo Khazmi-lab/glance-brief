@@ -4,6 +4,7 @@
 // Write: users.drafts.create ONLY (never messages.send). The draft lands in the
 //   user's Gmail Drafts for them to review and send. Scope: gmail.compose.
 import type { EmailItem, MailSource, ReplySink } from '../core/types'
+import { contextQuery } from '../core/context'
 import type { HttpClient } from './http'
 
 interface GMessage {
@@ -47,7 +48,16 @@ export function parseMessage(body: unknown): EmailItem | null {
 export class GmailSource implements MailSource {
   constructor(private http: HttpClient) {}
   async unread(limit: number): Promise<EmailItem[]> {
-    const q = new URLSearchParams({ q: 'is:unread in:inbox category:primary', maxResults: String(limit) })
+    return this.search('is:unread in:inbox category:primary', limit)
+  }
+  /** v0.4 meeting context: recent mail from/to the attendees, metadata + snippet only, small window. */
+  async withPeople(addresses: string[], o: { days: number; limit: number }): Promise<EmailItem[]> {
+    const q = contextQuery(addresses, o.days)
+    if (!q) return []
+    return this.search(q, Math.min(o.limit, 10))
+  }
+  private async search(query: string, limit: number): Promise<EmailItem[]> {
+    const q = new URLSearchParams({ q: query, maxResults: String(limit) })
     const list = (await this.http.getJson(`/gmail/v1/users/me/messages?${q}`)) as { messages?: { id: string }[] }
     const ids = (list.messages ?? []).slice(0, limit).map(m => m.id)
     const meta = 'format=metadata&metadataHeaders=From&metadataHeaders=Subject'
@@ -56,11 +66,17 @@ export class GmailSource implements MailSource {
   }
 }
 
+/** "Name <addr>" when the name is plain printable ASCII (so the draft list can show who it is for). */
+export function toHeader(to: EmailItem): string {
+  const name = to.from.trim()
+  return name && name !== to.fromAddress && /^[A-Za-z0-9 .'_-]{1,60}$/.test(name) ? `${name} <${to.fromAddress}>` : to.fromAddress
+}
+
 /** RFC 2822 reply body, base64url-encoded as Gmail's drafts.create expects. */
 export function buildReplyRaw(to: EmailItem, body: string): string {
   const subject = /^re:/i.test(to.subject) ? to.subject : `Re: ${to.subject}`
   const mime = [
-    `To: ${to.fromAddress}`,
+    `To: ${toHeader(to)}`,
     `Subject: ${subject}`,
     'Content-Type: text/plain; charset="UTF-8"',
     '',
@@ -83,7 +99,7 @@ export class GmailDraftSink implements ReplySink {
       message: { threadId: to.threadId, raw: buildReplyRaw(to, body) },
     })) as { id?: string }
     return res?.id
-      ? { ok: true, detail: `Draft saved in Gmail (not sent). Reply to ${to.from}.` }
+      ? { ok: true, detail: `Draft saved in Gmail (not sent). Reply to ${to.from}.`, draftId: res.id }
       : { ok: false, detail: 'Gmail did not return a draft id.' }
   }
 }

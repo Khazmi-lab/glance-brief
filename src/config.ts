@@ -1,6 +1,7 @@
 // Runtime config from the launch URL. No secrets here: the backend holds OAuth
 // tokens and LLM keys; the glasses app only carries a short-lived pairing token.
 //   ?backend=https://api.example.com&pair=<token>&model=<llm-model>&tz=Europe/Rome
+//   DEMO only: ?demo=b2b (back-to-back) or ?demo=after (just after a meeting: drafts reminder first)
 // Without `backend`, the app runs in DEMO mode on labelled fixture data.
 export interface Config {
   backend?: string
@@ -8,6 +9,8 @@ export interface Config {
   model?: string
   timeZone: string
   demo: boolean
+  /** DEMO scenario (?demo=b2b|after); ignored with a backend. */
+  scenario: 'default' | 'b2b' | 'after'
 }
 
 export function readConfig(search: string, defaultTz: string): Config {
@@ -20,5 +23,6 @@ export function readConfig(search: string, defaultTz: string): Config {
     model: p.get('model') || undefined,
     timeZone: p.get('tz') || defaultTz || 'UTC',
     demo: !valid,
+    scenario: (['b2b', 'after'] as const).find(x => x === p.get('demo')) ?? 'default',
   }
 }

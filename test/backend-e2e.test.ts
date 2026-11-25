@@ -142,3 +142,41 @@ describe('glasses app <-> backend <-> Google (mocked)', () => {
     shown.forEach(expectFits)
   })
 })
+
+describe('v0.4 drafts reminder end to end (app adapters <-> real backend <-> FAKE Google)', () => {
+  it('a reply saved from the glasses shows up as waiting; a stale one is discarded only after confirm', async () => {
+    const { GmailDraftSink: Sink } = await import('../src/adapters/gmail')
+    const { BackendDrafts } = await import('../src/adapters/drafts')
+    const b = await boot({ llm: false })
+    close = b.close
+    const token = await pairDevice(b.base)
+    const http = new FetchHttpClient(b.base, token)
+    const tracker = new BackendDrafts(http)
+    const item = { id: 'a1', threadId: 't1', from: 'Giulia Bianchi', fromAddress: 'giulia@example.com', subject: 'Budget', snippet: '', receivedAt: new Date() }
+    const saved = await new Sink(http).saveReply(item, 'Numbers by 16:00.')
+    expect(saved).toMatchObject({ ok: true, draftId: 'r-draft-1' })
+    const list = await tracker.pending()
+    expect(list.map(d => [d.id, d.to, d.subject])).toEqual([['r-draft-1', 'Giulia Bianchi', 'Re: Budget']])
+    // Age the ledger entry to 5 days so it is stale, then run the real app flow.
+    const acc = Object.values((b.store as any).data.accounts)[0] as any
+    acc.appDrafts[0].createdAt = Date.now() - 5 * 86400000
+    const shown: string[] = []
+    const app = new GlanceApp({
+      calendar: { upcoming: async () => [], recentlyEnded: async (now: Date) => [{ id: 'x', title: 'Standup', start: new Date(now.getTime() - 30 * 60000), end: new Date(now.getTime() - 5 * 60000), attendees: [] }] },
+      mail: { unread: async () => [] }, summarizer: new HeuristicSummarizer(), sink: new Sink(http),
+      display: { show: t => { shown.push(t) }, exit: () => {} }, now: () => new Date(), timeZone: 'UTC', demo: false, drafts: tracker,
+    })
+    await app.load()
+    expect(shown[0]).toMatch(/^DRAFTS WAITING/)
+    expect(shown[0]).toContain('Meeting over. 1 reply not sent yet')
+    await app.dispatch({ type: 'click' })
+    expect(shown.at(-1)).toMatch(/^DISCARD 1 OLD DRAFT\?/)
+    expect(b.up.drafts.has('r-draft-1')).toBe(true) // not yet
+    await app.dispatch({ type: 'click' })
+    expect(shown.at(-1)).toMatch(/^DONE\nDiscarded 1 old draft/)
+    expect(b.up.drafts.has('r-draft-1')).toBe(false)
+    expect(b.up.drafts.has('user-own-draft')).toBe(true)
+    expect(b.up.calls.some(c => /send/.test(c.url))).toBe(false)
+    shown.forEach(expectFits)
+  })
+})

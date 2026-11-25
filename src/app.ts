@@ -1,8 +1,8 @@
 // Controller: wires sources + summarizer + state machine to a Display.
 // The Display is the glasses bridge in production and a fake in tests.
-import { buildBrief, composePages } from './core/brief'
+import { buildBrief, composePages, draftsInfo } from './core/brief'
 import { initialState, reduce, render, type Effect, type Input, type State } from './core/state'
-import type { CalendarSource, MailSource, Mic, ReplySink, SpeechToText, Summarizer } from './core/types'
+import type { CalendarSource, DraftTracker, MailSource, Mic, ReplySink, SpeechToText, Summarizer } from './core/types'
 import { MIN_BYTES, VoiceBuffer, toBytes } from './core/voice'
 
 export interface Display {
@@ -22,6 +22,8 @@ export interface AppDeps {
   /** Voice reply (optional): without both, long press shows "voice not available". */
   mic?: Mic
   stt?: SpeechToText
+  /** Pending-drafts reminder (optional): tracks only drafts this app created. */
+  drafts?: DraftTracker
 }
 
 export class GlanceApp {
@@ -40,9 +42,24 @@ export class GlanceApp {
 
   async load(): Promise<void> {
     const now = this.d.now()
-    this.card = await buildBrief(this.d.calendar, this.d.mail, this.d.summarizer, { now, timeZone: this.d.timeZone, demo: this.d.demo })
+    this.card = await buildBrief(this.d.calendar, this.d.mail, this.d.summarizer, { now, timeZone: this.d.timeZone, demo: this.d.demo, drafts: this.d.drafts })
     this.state = initialState(composePages(this.card, { now, timeZone: this.d.timeZone }))
     await this.d.display.show(render(this.state))
+  }
+
+  /** Re-read the app-created drafts and rebuild the pages (keeps the current page where possible). */
+  private async refreshDrafts(): Promise<void> {
+    if (!this.card || !this.d.drafts) return
+    const now = this.d.now()
+    const before = this.state.pages[this.state.index]
+    const errors: string[] = []
+    const info = await draftsInfo(this.d.drafts, this.d.calendar, { now, timeZone: this.d.timeZone }, this.card.meeting, !!this.card.backToBack, errors)
+    // Keep the drafts card where it was; only its numbers change.
+    this.card.drafts = { ...info, moment: this.card.drafts?.moment === 'later' || info.list.length === 0 ? 'later' : this.card.drafts?.moment ?? 'later' }
+    const pages = composePages(this.card, { now, timeZone: this.d.timeZone })
+    let index = pages.findIndex(p => p.kind === before?.kind && p.emailIndex === before?.emailIndex)
+    if (index < 0) index = Math.min(this.state.index, pages.length - 1)
+    this.state = { ...this.state, pages, index }
   }
 
   /** Serialise inputs so async effects can't interleave. */
@@ -62,6 +79,20 @@ export class GlanceApp {
 
   private async run(e: Effect): Promise<void> {
     if (e.type === 'exit') { await this.d.display.exit(); return }
+    if (e.type === 'discard_drafts') {
+      let detail: string
+      let ok = false
+      try {
+        const n = await this.d.drafts!.discard(e.ids)
+        ok = true
+        detail = `Discarded ${n} old ${n === 1 ? 'draft' : 'drafts'} (only ones Glance Brief made). Nothing sent.`
+      } catch (err) {
+        detail = `Not discarded: ${err instanceof Error ? err.message : String(err)}`
+      }
+      await this.refreshDrafts()
+      await this.step({ type: 'discard_done', ok, detail })
+      return
+    }
     if (e.type === 'start_mic') {
       if (!this.d.mic || !this.d.stt) { await this.step({ type: 'mic_failed', reason: 'voice not configured' }); return }
       this.voice.start()
@@ -102,7 +133,14 @@ export class GlanceApp {
     } else if (e.type === 'save_reply') {
       try {
         const r = await this.d.sink.saveReply(item, e.body)
-        await this.step({ type: 'save_done', ok: r.ok, detail: r.detail })
+        let detail = r.detail
+        if (r.ok && this.d.drafts) {
+          this.d.drafts.noteSaved?.(item, r.draftId, this.d.now())
+          const n = await this.d.drafts.pending().then(l => l.length).catch(() => 0)
+          if (n > 0) detail += ` ${n} waiting in Drafts.`
+          await this.refreshDrafts()
+        }
+        await this.step({ type: 'save_done', ok: r.ok, detail })
       } catch (err) {
         await this.step({ type: 'save_done', ok: false, detail: `Not saved: ${err instanceof Error ? err.message : String(err)}` })
       }

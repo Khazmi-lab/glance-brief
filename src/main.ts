@@ -8,7 +8,8 @@ import {
 import { GlanceApp } from './app'
 import { readConfig } from './config'
 import { mapEvent } from './core/events'
-import { DemoCalendar, DemoMail, DemoReplySink } from './adapters/demo'
+import { DemoCalendar, DemoDrafts, DemoMail, DemoReplySink } from './adapters/demo'
+import { BackendDrafts } from './adapters/drafts'
 import { FetchHttpClient } from './adapters/http'
 import { PairingClient, TOKEN_KEY, browserStorage, runPairing } from './adapters/pairing'
 import { GoogleCalendarSource } from './adapters/google-calendar'
@@ -48,9 +49,9 @@ const mic: Mic = {
 if (cfg.demo) {
   const base = new Date()
   app = new GlanceApp({
-    calendar: new DemoCalendar(base), mail: new DemoMail(base), summarizer: heuristic, sink: new DemoReplySink(),
+    calendar: new DemoCalendar(base, cfg.scenario), mail: new DemoMail(base), summarizer: heuristic, sink: new DemoReplySink(),
     display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: true,
-    mic, stt: new DemoStt(),
+    mic, stt: new DemoStt(), drafts: new DemoDrafts(base),
   })
 } else {
   // Device token: launch URL (?pair=) for development, else storage, else pair now.
@@ -75,7 +76,7 @@ if (cfg.demo) {
     calendar: new GoogleCalendarSource(http), mail: new GmailSource(http),
     summarizer: cfg.model ? new FallbackSummarizer(new LlmSummarizer(http, cfg.model), heuristic) : heuristic,
     sink: new GmailDraftSink(http), display: display(), now: () => new Date(), timeZone: cfg.timeZone, demo: false,
-    mic, stt: new BackendStt(http),
+    mic, stt: new BackendStt(http), drafts: new BackendDrafts(http),
   })
 }
 

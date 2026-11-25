@@ -62,7 +62,7 @@ describe('Gmail adapter (fixture = test data)', () => {
     expect(h.posts.some(p => p.path.includes('send'))).toBe(false)
     const raw = h.posts[0].body.message.raw as string
     const mime = new TextDecoder().decode(Uint8Array.from(atob(raw.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)))
-    expect(mime).toContain('To: giulia@example.com')
+    expect(mime).toContain('To: Giulia Bianchi <giulia@example.com>')
     expect(mime).toContain('Subject: Re: Budget numbers for planning')
     expect(mime).toContain('Grazie!')
     expect(h.posts[0].body.message.threadId).toBe('t1')

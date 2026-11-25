@@ -5,7 +5,10 @@
 //   POST /gmail/v1/users/me/drafts              ({ message: { raw, threadId? } } only)
 //   GET  /calendar/v3/calendars/:id/events      (timeMin, timeMax, singleEvents, orderBy, maxResults<=20)
 //   POST /llm/v1/chat/completions               (model allow-list, <=4 messages, <=8000 chars, max_tokens<=200)
-// Anything else (including every Gmail send path) -> 404.
+//   GET  /glance/drafts                         (v0.4: app-created drafts that still exist; To/Subject only)
+//   POST /glance/drafts/discard                 (v0.4: { ids } -> delete ONLY ledger ids; anything else 403)
+// Gmail search `q` must match a small grammar (unread/inbox/category, from:/to: addresses, OR, (), newer_than<=30d).
+// Anything else (including every Gmail send path) -> 404. Deleting a draft is not sending.
 import { SCOPES, type GoogleOAuth } from './google.ts'
 import type { Account, TokenStore } from './store.ts'
 
@@ -28,6 +31,19 @@ export class ProxyError extends Error {
 const ID = /^[A-Za-z0-9_-]{1,128}$/
 const CAL_ID = /^(primary|[A-Za-z0-9._%+-]{1,128}@[A-Za-z0-9.-]{1,128})$/
 const META_HEADERS = new Set(['From', 'Subject', 'Date', 'To'])
+export const LEDGER_MAX = 200
+export const DRAFTS_LIST_MAX = 20
+
+const Q_TOKEN = /^(is:unread|in:inbox|category:primary|OR|\(|\)|newer_than:([1-9]|[12]\d|30)d|(from|to):[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,100}\.[A-Za-z]{2,24})$/
+/** Allow-listed Gmail search grammar: no free-text search over the mailbox. */
+export function safeQuery(v: string): string | null {
+  if (v.length > 400) return null
+  const tokens = v.replace(/\(/g, ' ( ').replace(/\)/g, ' ) ').trim().split(/\s+/).filter(Boolean)
+  if (!tokens.length || !tokens.every(t => Q_TOKEN.test(t))) return null
+  let depth = 0
+  for (const t of tokens) { depth += t === '(' ? 1 : t === ')' ? -1 : 0; if (depth < 0 || depth > 2) return null }
+  return depth === 0 ? v : null
+}
 
 function pick(q: URLSearchParams, allowed: Record<string, (v: string) => string | null>): URLSearchParams {
   const out = new URLSearchParams()
@@ -80,7 +96,7 @@ export class Proxy {
   async handle(acc: Account, method: string, path: string, query: URLSearchParams, body: unknown): Promise<ProxyResult> {
     let m: RegExpMatchArray | null
     if (method === 'GET' && path === '/gmail/v1/users/me/messages') {
-      const q = pick(query, { q: short(200), maxResults: clampInt(20), pageToken: short(200) })
+      const q = pick(query, { q: safeQuery, maxResults: clampInt(20), pageToken: short(200) })
       return this.google(acc, `${GMAIL}${path}?${q}`)
     }
     if (method === 'GET' && (m = path.match(/^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/))) {
@@ -104,8 +120,15 @@ export class Proxy {
       const r = await this.google(acc, `${GMAIL}/gmail/v1/users/me/drafts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(out) })
       // Return only the draft id: the app needs nothing else.
       const id = (r.body as { id?: string })?.id
+      if (r.status < 300 && typeof id === 'string' && ID.test(id)) {
+        // Remember that WE made this draft (the only drafts the reminder may list or discard).
+        acc.appDrafts = [...(acc.appDrafts ?? []).filter(d => d.id !== id), { id, createdAt: this.now() }].slice(-LEDGER_MAX)
+        await this.store.putAccount(acc)
+      }
       return r.status < 300 ? { status: r.status, body: { id } } : r
     }
+    if (method === 'GET' && path === '/glance/drafts') return this.listDrafts(acc)
+    if (method === 'POST' && path === '/glance/drafts/discard') return this.discardDrafts(acc, body)
     if (method === 'GET' && (m = path.match(/^\/calendar\/v3\/calendars\/([^/]+)\/events$/))) {
       const cal = decodeURIComponent(m[1])
       if (!CAL_ID.test(cal)) throw new ProxyError(400, 'bad calendar id')
@@ -114,6 +137,44 @@ export class Proxy {
     }
     if (method === 'POST' && path === '/llm/v1/chat/completions') return this.chat(body)
     throw new ProxyError(404, 'not found')
+  }
+
+  /** App-created drafts that still exist. A 404 means the user sent or deleted it: drop it from the ledger. */
+  private async listDrafts(acc: Account): Promise<ProxyResult> {
+    const ledger = [...(acc.appDrafts ?? [])].sort((a, b) => b.createdAt - a.createdAt).slice(0, DRAFTS_LIST_MAX)
+    const gone = new Set<string>()
+    const drafts: { id: string; to: string; subject: string; createdAt: number }[] = []
+    for (const d of ledger) {
+      const r = await this.google(acc, `${GMAIL}/gmail/v1/users/me/drafts/${d.id}?format=metadata`)
+      if (r.status === 404) { gone.add(d.id); continue }
+      if (r.status >= 300) return { status: 502, body: { error: `drafts: upstream HTTP ${r.status}` } }
+      const headers = (r.body as { message?: { payload?: { headers?: { name?: string; value?: string }[] } } })?.message?.payload?.headers ?? []
+      const h = (n: string) => String(headers.find(x => x.name?.toLowerCase() === n)?.value ?? '').slice(0, 200)
+      drafts.push({ id: d.id, to: h('to'), subject: h('subject'), createdAt: d.createdAt })
+    }
+    if (gone.size) { acc.appDrafts = (acc.appDrafts ?? []).filter(d => !gone.has(d.id)); await this.store.putAccount(acc) }
+    return { status: 200, body: { drafts } }
+  }
+
+  /** Delete ONLY drafts from this account's ledger. One foreign id -> 403 and nothing is deleted. */
+  private async discardDrafts(acc: Account, body: unknown): Promise<ProxyResult> {
+    if (!acc.scopes.includes(SCOPES[1])) throw new ProxyError(403, 'gmail.compose was not granted at sign-in')
+    const b = body as { ids?: unknown }
+    const keys = Object.keys((body as object) ?? {})
+    const ids = Array.isArray(b?.ids) ? b.ids : null
+    if (keys.length !== 1 || !ids || !ids.length || ids.length > DRAFTS_LIST_MAX || !ids.every(x => typeof x === 'string' && ID.test(x)))
+      throw new ProxyError(400, 'expected { ids: [draftId, ...] } (1-20)')
+    const mine = new Set((acc.appDrafts ?? []).map(d => d.id))
+    if (!ids.every(id => mine.has(id as string))) throw new ProxyError(403, 'only drafts created by Glance Brief can be discarded')
+    let discarded = 0
+    const removed = new Set<string>()
+    for (const id of new Set(ids as string[])) {
+      const r = await this.google(acc, `${GMAIL}/gmail/v1/users/me/drafts/${id}`, { method: 'DELETE' })
+      if (r.status < 300) { discarded++; removed.add(id) } else if (r.status === 404) removed.add(id)
+    }
+    acc.appDrafts = (acc.appDrafts ?? []).filter(d => !removed.has(d.id))
+    await this.store.putAccount(acc)
+    return { status: 200, body: { discarded } }
   }
 
   private async chat(body: unknown): Promise<ProxyResult> {

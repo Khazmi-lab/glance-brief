@@ -20,7 +20,11 @@ Open-source dependencies: TypeScript, Vite, Vitest.
 ## Screens (each ≤ 6 lines)
 | Screen | Content | Input |
 |---|---|---|
-| Next meeting | title, start time + "in 12 min" + room, one-line AI brief, unread count | swipe = next page, tap = jump to inbox |
+| Drafts waiting (v0.4) | "Meeting over. 3 replies not sent yet", "In Gmail Drafts: send them there.", stale count + oldest age. First screen right after a meeting / at end of day, otherwise last in the scroll | tap = tidy up old drafts (confirm screen), swipe = next |
+| Discard N old drafts? (v0.4) | names + ages of app-created drafts ≥ 3 days old, "Only drafts Glance Brief made." | **tap = discard**, swipe = keep |
+| Back-to-back (v0.4) | shown first while you are in a meeting and the next starts ≤ 5 min after it ends: next start + room, who: what, one pending item | tap or swipe = full brief |
+| Next meeting | title, start time + "in 12 min" + room, one-line AI brief, pending + unread count | swipe = next page, tap = jump to inbox |
+| Pending (v0.4) | up to 3 "Name: open item" lines from recent mail with the attendees (14 days, ≤ 5 emails) | swipe |
 | Notes 1/n | invite notes paged 4 lines at a time + attendees | swipe |
 | Inbox i/n | sender, subject, ≤12-word AI summary | tap = draft reply, swipe = next |
 | Listening | "LISTENING... (max 15 s)" while you hold a long press on an email | release = transcribe, swipe = cancel (audio discarded) |
@@ -72,14 +76,18 @@ Google sign-in does not work inside the WebView, so the glasses pair with a code
 Allow-list proxy (`server/src/proxy.ts`), everything else is 404:
 | App call | Forwarded to | Limits |
 |---|---|---|
-| `GET /gmail/v1/users/me/messages` | Gmail `messages.list` | `q`, `maxResults ≤ 20`, `pageToken` only |
+| `GET /gmail/v1/users/me/messages` | Gmail `messages.list` | `q` must match a small grammar (`is:unread`, `in:inbox`, `category:primary`, `from:`/`to:` addresses, `OR`, parentheses, `newer_than:` ≤ 30d; no free-text search), `maxResults ≤ 20`, `pageToken` |
 | `GET /gmail/v1/users/me/messages/:id` | Gmail `messages.get` | **forced `format=metadata`**, From/Subject/Date/To headers |
 | `POST /gmail/v1/users/me/drafts` | Gmail `drafts.create` | body must be `{message:{raw,threadId?}}`; returns only the draft id |
 | `GET /calendar/v3/calendars/:id/events` | Calendar `events.list` | timeMin/timeMax/singleEvents/orderBy/`maxResults ≤ 20` |
 | `POST /llm/v1/chat/completions` | OpenAI-compatible LLM | model allow-list, ≤ 4 system/user messages, ≤ 8,000 chars, `max_tokens ≤ 200` |
+| `GET /glance/drafts` (v0.4) | Gmail `drafts.get?format=metadata` for **ledger ids only** | drafts this backend created and that still exist; returns id, To, Subject, created time (no body). A 404 (you sent or deleted it in Gmail) removes it from the ledger |
+| `POST /glance/drafts/discard` (v0.4) | Gmail `drafts.delete` | `{ids}` (1–20); **every id must be in the ledger or the whole request is 403** and nothing is deleted; needs `gmail.compose` |
 | `POST /stt/v1/transcribe` | OpenAI-compatible `/audio/transcriptions` (WAV) | 16 kHz s16le base64 only, 0.3–15 s, fixed model (`STT_MODEL`), returns `{text}` ≤ 1,000 chars |
 Google has no drafts-only scope: `gmail.compose` could also send, so **send is blocked in the
-proxy** (no `messages/send`, `drafts/send`, modify, trash or delete route exists; tested). Drafts are
+proxy** (no `messages/send`, `drafts/send`, modify, trash or message-delete route exists; tested). The
+only delete is `drafts.delete` on drafts the backend itself created (its per-account ledger), reached
+only from a confirm screen on the glasses; the user's own drafts are never listed or touched (tested). Drafts are
 refused with 403 if the user unticked `gmail.compose` on the consent screen. Access tokens are
 refreshed server-side (and once on an upstream 401). Rate limits: code entry 10/10 min per IP,
 `/pair/start` 20/10 min per IP, 120 proxied calls/min per device. Logs contain no tokens, codes or
@@ -110,19 +118,54 @@ npm run build       # tsc (app + server) + vite build
 npm run pack        # -> glance-brief.ehpk (local only)
 ./sim_demo.sh /tmp/out "" down down down click click click double_click        # demo-data walk-through
 ./sim_demo.sh /tmp/out "?backend=http://localhost:8787" double_click          # pairing screen (backend running)
+./sim_demo.sh /tmp/out "?demo=b2b" click down             # v0.4 back-to-back glance card -> full brief -> pending
+./sim_demo.sh /tmp/out "?demo=after" click click            # v0.4 drafts waiting -> confirm -> discard old drafts
 SIM_ARGS="--aid alsa:pulse" ./sim_demo.sh /tmp/out "" click long_press sleep2.5 long_press_release sleep1 click double_click  # voice reply (needs an audio input)
 ```
 
-## Status (24 Nov 2026, afternoon)
+## Real-life moments (v0.4)
+An organizer's feedback named four everyday moments. What the app does about each:
+
+1. **"The reply is only a draft. How do I remember to send it, and how do drafts not pile up?"**
+   The backend keeps a ledger of the drafts *it* created. The app asks which of them still exist (a draft
+   you sent or deleted in Gmail drops out) and shows **"N replies not sent yet · In Gmail Drafts: send them
+   there."** It shows this first at natural pauses: right after a meeting ends (when the next one is more
+   than 10 min away) or after 17:00 local time. Otherwise it waits at the end of the scroll, so it never
+   gets in the way of a meeting brief. Drafts at least 3 days old can be discarded: tap, read the confirm
+   screen (names and ages, "Only drafts Glance Brief made."), tap again. Swipe keeps them. The backend
+   refuses any id that is not in its ledger, so your own drafts are never touched. The app still never
+   sends anything; sending happens in Gmail, by you.
+2. **"The brief only comes from the invite. Recent mail with the same people says more."**
+   For the meeting in focus, the app reads up to 5 emails from or to the attendees in the last 14 days
+   (metadata and snippet only, through the same allow-listed proxy with a narrow search grammar). It
+   turns them into up to 3 "Name: open item" lines on a **Pending** page, with the count on the meeting
+   card. With an LLM it asks for open items drawn only from those emails. Offline (or if the LLM fails),
+   a fallback takes the first request-like sentence ("can you…", "please…", a question) of each person's
+   newest email, and adds no words of its own.
+3. **"Back-to-back meetings leave no time to read the brief."**
+   If you are in a meeting and the next one starts within 5 min of its end, the first screen becomes one
+   glance: next start and room, who and what, and one pending item. Tap or swipe opens the full brief.
+4. **"Who would use it every day, and who would pay?"**
+   *Hypothesis, not validated. We have no user or market data yet.* Daily users: people whose day is
+   back-to-back calendar slots plus a busy Gmail inbox, who already wear G2. For example founders,
+   managers, consultants, account executives and recruiters walking between meetings. Possible pricing:
+   the app free in DEMO mode or self-hosted, plus a paid monthly subscription for a hosted, privacy-first
+   backend (OAuth, token storage, LLM and STT usage included), and later a team plan an employer pays
+   for. Price points are not set and would be tested with real users first.
+
+All four are tested with DEMO/TEST data and fake Google/LLM upstreams. None has been tried on a real
+account yet.
+
+## Status (25 Nov 2026, v0.4)
 Done: core logic, adapters, demo mode, backend (pairing-code OAuth, token store, allow-list Gmail/
 Calendar/LLM/STT proxy), pairing flow in the app, `app.json` network whitelist + microphone permission,
-voice reply (long press), 114 tests, build, `.ehpk` pack, simulator walk-throughs (demo data; pairing
-screen against the local backend; voice reply with real simulator audio frames from a virtual test tone
-and the labelled demo transcript).
+voice reply (long press), v0.4 real-life moments (pending-drafts reminder with confirm-before-discard of
+stale app-created drafts, meeting context from recent mail, back-to-back glance card), 150 tests, build,
+`.ehpk` pack, simulator walk-throughs (DEMO data; pairing screen against the local backend).
 Not tested against real Google, a real LLM, or a real speech-to-text service (all upstreams are test
 doubles so far); voice not tried on a real G2.
-Demo video (≤ 3 min): real Even Hub simulator 0.9.5 captures of this build in DEMO mode plus the
-pairing screen against the local backend (see the BUIDL page for the link).
+Demo videos (≤ 3 min each, DEMO data, real Even Hub simulator 0.9.5 captures): see the
+[demo page](https://khazmi-lab.github.io/glance-brief/) and the GitHub releases.
 Not done: hosting (plan only, see HOSTING.md), Notion "ask my notes", real-account demo (needs the
 owner's own Google account/OAuth client, an LLM key and an STT key).
 

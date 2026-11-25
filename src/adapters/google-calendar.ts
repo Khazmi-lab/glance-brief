@@ -49,6 +49,7 @@ export function parseEvents(body: unknown): Meeting[] {
       location: e.location?.trim() || undefined,
       description: e.description ? stripHtml(e.description).replace(/\s+/g, ' ').trim() : undefined,
       attendees: (e.attendees ?? []).filter(a => !a.self).map(a => a.displayName || (a.email ?? '').split('@')[0]).filter(Boolean),
+      attendeeEmails: (e.attendees ?? []).filter(a => !a.self && a.email).map(a => a.email!.toLowerCase()),
       joinUrl: video,
     })
   }
@@ -57,14 +58,26 @@ export function parseEvents(body: unknown): Meeting[] {
 
 export class GoogleCalendarSource implements CalendarSource {
   constructor(private http: HttpClient, private calendarId = 'primary') {}
-  async upcoming(now: Date, limit: number): Promise<Meeting[]> {
+  private cache?: { at: number; events: Promise<Meeting[]> }
+  /** One events.list per launch time (timeMin = now - 60 min) serves both upcoming and recentlyEnded. */
+  private window(now: Date, limit: number): Promise<Meeting[]> {
+    if (this.cache?.at === now.getTime()) return this.cache.events
     const q = new URLSearchParams({
       timeMin: new Date(now.getTime() - 60 * 60000).toISOString(),
       singleEvents: 'true',
       orderBy: 'startTime',
       maxResults: String(Math.max(limit * 3, 10)),
     })
-    const body = await this.http.getJson(`/calendar/v3/calendars/${encodeURIComponent(this.calendarId)}/events?${q}`)
-    return parseEvents(body).filter(m => m.end.getTime() > now.getTime()).slice(0, limit)
+    const events = this.http.getJson(`/calendar/v3/calendars/${encodeURIComponent(this.calendarId)}/events?${q}`).then(parseEvents)
+    this.cache = { at: now.getTime(), events }
+    events.catch(() => { if (this.cache?.events === events) this.cache = undefined })
+    return events
+  }
+  async upcoming(now: Date, limit: number): Promise<Meeting[]> {
+    return (await this.window(now, limit)).filter(m => m.end.getTime() > now.getTime()).slice(0, limit)
+  }
+  async recentlyEnded(now: Date, withinMin: number): Promise<Meeting[]> {
+    const t = now.getTime()
+    return (await this.window(now, 4)).filter(m => m.end.getTime() <= t && t - m.end.getTime() <= withinMin * 60000).sort((a, b) => b.end.getTime() - a.end.getTime())
   }
 }

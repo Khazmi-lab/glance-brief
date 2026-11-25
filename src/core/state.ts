@@ -3,6 +3,8 @@
 // the confirm screen after an explicit tap. Voice reply (long press on an email):
 // listening -> transcribing -> drafting -> the SAME confirm screen; nothing is
 // ever sent, and a voice draft is saved only after the same confirm tap.
+// v0.4: the drafts card can discard STALE APP-CREATED drafts, again only via an explicit
+// confirm screen (tap on the card -> confirm -> tap = 'discard_drafts' effect; swipe keeps them).
 import type { Page } from './brief'
 import { LINE_CHARS, MAX_LINES, fitPx, truncate, wrapClamp } from './text'
 
@@ -21,8 +23,9 @@ export type Input =
   | { type: 'draft_ready'; body: string }
   | { type: 'draft_failed'; reason: string }
   | { type: 'save_done'; ok: boolean; detail: string }
+  | { type: 'discard_done'; ok: boolean; detail: string }
 
-export type Mode = 'browse' | 'listening' | 'transcribing' | 'drafting' | 'confirm' | 'saving' | 'result'
+export type Mode = 'browse' | 'listening' | 'transcribing' | 'drafting' | 'confirm' | 'saving' | 'result' | 'discard_confirm' | 'discarding'
 
 export interface State {
   pages: Page[]
@@ -42,6 +45,8 @@ export type Effect =
   /** Close the mic; `transcribe` = send the captured audio to STT, else discard it. */
   | { type: 'stop_mic'; transcribe: boolean; emailIndex?: number }
   | { type: 'polish_reply'; emailIndex: number; said: string }
+  /** Delete these app-created drafts. Emitted only from the discard confirm screen. */
+  | { type: 'discard_drafts'; ids: string[] }
 
 export function initialState(pages: Page[]): State {
   return { pages, index: 0, mode: 'browse' }
@@ -79,6 +84,10 @@ export function reduce(s: State, input: Input): { state: State; effects: Effect[
       if (input.type === 'click') {
         if (page?.kind === 'email' && page.emailIndex !== undefined)
           return { state: { ...s, mode: 'drafting', draft: undefined }, effects: [{ type: 'request_draft', emailIndex: page.emailIndex }] }
+        // Drafts card with stale drafts: tap asks for confirmation (nothing is deleted yet).
+        if (page?.kind === 'drafts' && page.staleIds?.length) return { state: { ...s, mode: 'discard_confirm' }, effects: [] }
+        // Glance card / drafts card without stale drafts: tap continues to the next page.
+        if (page?.kind === 'glance' || page?.kind === 'drafts') return { state: { ...s, index: Math.min(s.index + 1, s.pages.length - 1) }, effects: [] }
         // Tap on a meeting/notes page jumps to the first email (or stays).
         const first = s.pages.findIndex(p => p.kind === 'email')
         return { state: { ...s, index: first >= 0 ? first : s.index }, effects: [] }
@@ -93,6 +102,14 @@ export function reduce(s: State, input: Input): { state: State; effects: Effect[
       if (input.type === 'click' && s.draft && page?.emailIndex !== undefined)
         return { state: { ...s, mode: 'saving' }, effects: [{ type: 'save_reply', emailIndex: page.emailIndex, body: s.draft }] }
       if (swipe) return { state: { ...s, mode: 'browse', draft: undefined, heard: undefined }, effects: [] }
+      return { state: s, effects: [] }
+    case 'discard_confirm':
+      if (input.type === 'click' && page?.kind === 'drafts' && page.staleIds?.length)
+        return { state: { ...s, mode: 'discarding' }, effects: [{ type: 'discard_drafts', ids: [...page.staleIds] }] }
+      if (swipe) return { state: { ...s, mode: 'browse' }, effects: [] }
+      return { state: s, effects: [] }
+    case 'discarding':
+      if (input.type === 'discard_done') return { state: { ...s, mode: 'result', resultText: input.detail }, effects: [] }
       return { state: s, effects: [] }
     case 'saving':
       if (input.type === 'save_done') return { state: { ...s, mode: 'result', resultText: input.detail }, effects: [] }
@@ -135,6 +152,12 @@ export function render(s: State): string {
       break
     case 'saving':
       lines = ['SAVING DRAFT...']
+      break
+    case 'discard_confirm':
+      lines = page?.confirmLines ?? ['Nothing to discard.']
+      break
+    case 'discarding':
+      lines = ['DISCARDING OLD DRAFTS...']
       break
     case 'result':
       lines = ['DONE', ...wrapClamp(s.resultText ?? '', 3), 'Tap or swipe: continue']

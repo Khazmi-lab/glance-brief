@@ -10,6 +10,9 @@ export interface Call { method: string; url: string; auth?: string; body?: strin
 export function fakeUpstream(opts: { expireFirstAccess?: boolean; scope?: string; llmReply?: string; sttText?: string; sttStatus?: number } = {}) {
   const calls: Call[] = []
   let issued = 0
+  // Fake Gmail Drafts folder: id -> headers. Tests can delete entries to simulate "the user sent it in Gmail".
+  const drafts = new Map<string, { to: string; subject: string }>([['user-own-draft', { to: 'boss@example.com', subject: 'Private' }]])
+  let draftSeq = 0
   const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   const impl = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input)
@@ -47,11 +50,28 @@ export function fakeUpstream(opts: { expireFirstAccess?: boolean; scope?: string
       if (u.pathname === '/gmail/v1/users/me/messages') return reply(200, fx('gmail_list.json'))
       const m = u.pathname.match(/^\/gmail\/v1\/users\/me\/messages\/(a1|a2)$/)
       if (m) return reply(200, fx(`gmail_${m[1]}.json`))
-      if (u.pathname === '/gmail/v1/users/me/drafts' && init.method === 'POST') return reply(200, { id: 'r-draft-1', message: { id: 'm9', threadId: 't1', labelIds: ['DRAFT'] } })
+      if (u.pathname === '/gmail/v1/users/me/drafts' && init.method === 'POST') {
+        const id = `r-draft-${++draftSeq}`
+        let to = '', subject = ''
+        try {
+          const raw = JSON.parse(body ?? '{}').message.raw as string
+          const mime = Buffer.from(raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+          to = mime.match(/^To: (.*)$/m)?.[1] ?? ''; subject = mime.match(/^Subject: (.*)$/m)?.[1] ?? ''
+        } catch { /* test bodies may not be MIME */ }
+        drafts.set(id, { to, subject })
+        return reply(200, { id, message: { id: 'm9', threadId: 't1', labelIds: ['DRAFT'] } })
+      }
+      const dm = u.pathname.match(/^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/)
+      if (dm) {
+        const d = drafts.get(dm[1])
+        if (!d) return reply(404, { error: 'not found' })
+        if ((init.method ?? 'GET') === 'GET') return reply(200, { id: dm[1], message: { id: 'm9', payload: { headers: [{ name: 'To', value: d.to }, { name: 'Subject', value: d.subject }, { name: 'X-Body', value: 'SECRET BODY' }] } } })
+        if (init.method === 'DELETE') { drafts.delete(dm[1]); return new Response(null, { status: 204 }) }
+      }
       return reply(404, { error: 'not found' })
     }
     if (u.host === 'www.googleapis.com' && u.pathname === '/calendar/v3/calendars/primary/events') return reply(200, fx('calendar_events.json'))
     return reply(404, {})
   }) as typeof fetch
-  return { impl, calls }
+  return { impl, calls, drafts }
 }

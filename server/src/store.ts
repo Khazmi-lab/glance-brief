@@ -16,6 +16,8 @@ export interface Account {
   /** Scopes Google actually granted (the user can untick some on the consent screen). */
   scopes: string[]
   createdAt: number
+  /** Ledger of drafts THIS backend created (drafts.create). Only these may be listed or discarded. */
+  appDrafts?: { id: string; createdAt: number }[]
 }
 
 export interface Device {
